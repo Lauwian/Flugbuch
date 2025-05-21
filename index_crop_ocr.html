@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>OCR Flugbuch (Ausschnitt & Optimierung)</title>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 640px; margin: auto; }
+    #canvasContainer { position: relative; }
+    canvas { max-width: 100%; border: 1px solid #ccc; }
+    #output { white-space: pre-wrap; background: #f8f8f8; padding: 12px; margin-top: 20px; border-radius: 5px; border: 1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <h2>OCR Flugbuch (mit Auswahl & Optimierung)</h2>
+  <input type="file" id="imageInput" accept="image/*"><br><br>
+  <p>Wähle mit der Maus den relevanten Bereich im Bild:</p>
+  <div id="canvasContainer">
+    <canvas id="canvas"></canvas>
+  </div>
+  <button id="runOCR" disabled>Texterkennung starten</button>
+  <progress id="progress" value="0" max="1" style="width: 100%; display: block; margin-top: 10px;"></progress>
+  <div id="output">Bitte Bild hochladen und Bereich auswählen…</div>
+
+  <script>
+    const imageInput = document.getElementById('imageInput');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const output = document.getElementById('output');
+    const progress = document.getElementById('progress');
+    const runOCR = document.getElementById('runOCR');
+
+    let img = new Image();
+    let cropBox = null;
+
+    imageInput.addEventListener('change', () => {
+      const file = imageInput.files[0];
+      if (!file) return;
+      img.onload = () => {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+        cropBox = null;
+        output.innerText = "Bereich mit Maus wählen, dann OCR starten.";
+        runOCR.disabled = true;
+      };
+      img.src = URL.createObjectURL(file);
+    });
+
+    // Bereichsauswahl mit Maus
+    let startX, startY, isDrawing = false;
+    canvas.addEventListener('mousedown', e => {
+      const rect = canvas.getBoundingClientRect();
+      startX = e.clientX - rect.left;
+      startY = e.clientY - rect.top;
+      isDrawing = true;
+    });
+
+    canvas.addEventListener('mousemove', e => {
+      if (!isDrawing) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      ctx.drawImage(img, 0, 0);
+      ctx.strokeStyle = 'red';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(startX, startY, x - startX, y - startY);
+    });
+
+    canvas.addEventListener('mouseup', e => {
+      isDrawing = false;
+      const rect = canvas.getBoundingClientRect();
+      const endX = e.clientX - rect.left;
+      const endY = e.clientY - rect.top;
+      cropBox = {
+        x: Math.min(startX, endX),
+        y: Math.min(startY, endY),
+        w: Math.abs(endX - startX),
+        h: Math.abs(endY - startY)
+      };
+      runOCR.disabled = false;
+    });
+
+    runOCR.addEventListener('click', async () => {
+      if (!cropBox) return;
+
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = cropBox.w;
+      tempCanvas.height = cropBox.h;
+      const tempCtx = tempCanvas.getContext('2d');
+      tempCtx.drawImage(canvas, cropBox.x, cropBox.y, cropBox.w, cropBox.h, 0, 0, cropBox.w, cropBox.h);
+
+      output.innerText = "Texterkennung läuft…";
+
+      const worker = await Tesseract.createWorker({
+        logger: m => { if (m.status === 'recognizing text') progress.value = m.progress; }
+      });
+
+      await worker.loadLanguage('eng');
+      await worker.initialize('eng');
+      await worker.setParameters({
+        tessedit_pageseg_mode: 3,
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/-'
+      });
+
+      const { data: { text } } = await worker.recognize(tempCanvas);
+      await worker.terminate();
+
+      output.innerText = "Erkannter Text:\n\n" + text + "\n\n" + "🚀 Extrahierte Daten:\n" + extractFlightData(text);
+    });
+
+    function extractFlightData(text) {
+      const lines = text.split('\n').map(l => l.trim());
+      let result = '';
+      for (let line of lines) {
+        if (line.includes('FLIGHT ID')) result += 'Flugnummer: ' + getAfter(line, 'FLIGHT ID') + '\n';
+        if (line.includes('ORIG') && line.includes('DEST')) {
+          const match = line.match(/[A-Z]{4}\/[A-Z]{4}/);
+          if (match) {
+            const [from, to] = match[0].split('/');
+            result += `Abflug: ${from}\nZiel: ${to}\n`;
+          }
+        }
+        if (line.includes('OUT')) result += 'Offblock: ' + getTime(line, 'OUT') + '\n';
+        if (line.includes('OFF')) result += 'Takeoff: ' + getTime(line, 'OFF') + '\n';
+        if (line.includes('ON'))  result += 'Landung: ' + getTime(line, 'ON') + '\n';
+        if (line.includes('IN'))  result += 'Onblock: ' + getTime(line, 'IN') + '\n';
+        if (line.includes('DATE')) result += 'Datum: ' + getAfter(line, 'DATE') + '\n';
+      }
+      return result || '(Keine bekannten Daten erkannt)';
+    }
+
+    function getAfter(line, key) {
+      return line.split(key)[1]?.trim().split(' ')[0] || '';
+    }
+
+    function getTime(line, key) {
+      const match = line.match(new RegExp(key + '\s*([0-9]{3,4}Z)', 'i'));
+      return match ? match[1] : '';
+    }
+  </script>
+</body>
+</html>
