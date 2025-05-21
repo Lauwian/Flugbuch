@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>OCR Flugbuch</title>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+  <script src="https://docs.opencv.org/4.x/opencv.js" defer></script>
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: auto; }
+    canvas { display: none; }
+    #output { white-space: pre-wrap; background: #f8f8f8; padding: 12px; margin-top: 20px; border-radius: 5px; border: 1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <h2>OCR Flugbuch</h2>
+  <input type="file" id="imageInput" accept="image/*"><br><br>
+  <progress id="progress" value="0" max="1" style="width: 100%;"></progress>
+  <div id="output">Bitte Bild hochladen…</div>
+  <canvas id="canvasInput"></canvas>
+  <canvas id="canvasProcessed"></canvas>
+  <script>
+    const imageInput = document.getElementById('imageInput');
+    const output = document.getElementById('output');
+    const progress = document.getElementById('progress');
+    const canvasInput = document.getElementById('canvasInput');
+    const canvasProcessed = document.getElementById('canvasProcessed');
+    const ctxInput = canvasInput.getContext('2d');
+    const ctxProcessed = canvasProcessed.getContext('2d');
+    function waitForOpenCV(callback) {
+      const check = () => {
+        if (cv && cv.imread) callback();
+        else setTimeout(check, 100);
+      };
+      check();
+    }
+    imageInput.addEventListener('change', () => {
+      const file = imageInput.files[0];
+      if (!file) return;
+      output.innerText = "Lade Bild und initialisiere OpenCV…";
+      const img = new Image();
+      img.onload = () => {
+        canvasInput.width = img.width;
+        canvasInput.height = img.height;
+        ctxInput.drawImage(img, 0, 0);
+        waitForOpenCV(() => processImage());
+      };
+      img.src = URL.createObjectURL(file);
+    });
+    async function processImage() {
+      let src = cv.imread(canvasInput);
+      let gray = new cv.Mat();
+      let thresh = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+      cv.adaptiveThreshold(gray, thresh, 255, cv.ADAPTIVE_THRESH_MEAN_C, cv.THRESH_BINARY, 15, 5);
+      cv.imshow(canvasProcessed, thresh);
+      src.delete(); gray.delete();
+      output.innerText = "Führe Texterkennung durch…";
+      const worker = await Tesseract.createWorker({
+        logger: m => { if (m.status === 'recognizing text') progress.value = m.progress; }
+      });
+      await worker.loadLanguage('eng');
+      await worker.initialize('eng');
+      await worker.setParameters({
+        tessedit_pageseg_mode: 6,
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/'
+      });
+      const { data: { text } } = await worker.recognize(canvasProcessed);
+      await worker.terminate();
+      output.innerText = "Erkannter Text:\n\n" + text + "\n\n" + "🚀 Extrahierte Daten:\n" + extractFlightData(text);
+    }
+    function extractFlightData(text) {
+      const lines = text.split('\n').map(l => l.trim());
+      let result = '';
+      for (let line of lines) {
+        if (line.includes('FLIGHT ID')) result += 'Flugnummer: ' + getAfter(line, 'FLIGHT ID') + '\n';
+        if (line.includes('ORIG') && line.includes('DEST')) {
+          const match = line.match(/[A-Z]{4}\/[A-Z]{4}/);
+          if (match) {
+            const [from, to] = match[0].split('/');
+            result += `Abflug: ${from}\nZiel: ${to}\n`;
+          }
+        }
+        if (line.includes('OUT')) result += 'Offblock: ' + getTime(line, 'OUT') + '\n';
+        if (line.includes('OFF')) result += 'Takeoff: ' + getTime(line, 'OFF') + '\n';
+        if (line.includes('ON'))  result += 'Landung: ' + getTime(line, 'ON') + '\n';
+        if (line.includes('IN'))  result += 'Onblock: ' + getTime(line, 'IN') + '\n';
+        if (line.includes('DATE')) result += 'Datum: ' + getAfter(line, 'DATE') + '\n';
+      }
+      return result || '(Keine bekannten Daten erkannt)';
+    }
+    function getAfter(line, key) {
+      return line.split(key)[1]?.trim().split(' ')[0] || '';
+    }
+    function getTime(line, key) {
+      const match = line.match(new RegExp(key + '\s*([0-9]{3,4}Z)', 'i'));
+      return match ? match[1] : '';
+    }
+  </script>
+</body>
+</html>
